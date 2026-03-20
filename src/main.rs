@@ -38,19 +38,19 @@ const FILE_SIZE: usize = HEADER_SIZE + NODE_CAP * size_of::<Node>();
 const LEAK: f32 = 0.95;
 const THRESHOLD_REST: f32 = 1.0;
 const THRESHOLD_UP: f32 = 0.15;
-const THRESHOLD_DOWN: f32 = 0.001;
-const REFRACTORY_TICKS: u8 = 8;
+const THRESHOLD_DOWN: f32 = 0.005;
+const REFRACTORY_TICKS: u8 = 5;
 const STDP_WINDOW: u32 = 20;
 const LTP_RATE: f32 = 0.01;
 const LTD_RATE: f32 = 0.008;
-const NOISE_AMP: f32 = 0.001;
+const NOISE_AMP: f32 = 0.02;
 const WEIGHT_CAP: f32 = 1.0;
 const SURPRISE_DECAY: f32 = 0.95;
 const INPUT_STRENGTH: f32 = 2.0;
-const SIM_THRESHOLD: f32 = 0.5;
+const SIM_THRESHOLD: f32 = 0.3;
 const EMBED_DRIFT: f32 = 0.001;
 const ACTIVE_EPSILON: f32 = 0.05;
-const GLOBAL_SAMPLES: usize = 20;
+const GLOBAL_SAMPLES: usize = 50;
 const ACTIVE_CAP: usize = 2048;
 const INGEST_PER_TICK: usize = 8;
 const LTP_SAMPLE_CAP: usize = 64;
@@ -476,8 +476,8 @@ async fn main() -> io::Result<()> {
                         if c == idx { continue; }
                         let sim = cosine(&(*ptr.add(idx)).pos, &(*ptr.add(c)).pos);
                         if sim > SIM_THRESHOLD {
-                            add_edge(ptr, count, idx, c, sim * 0.1);
-                            add_edge(ptr, count, c, idx, sim * 0.1);
+                            add_edge(ptr, count, idx, c, sim * 0.3);
+                            add_edge(ptr, count, c, idx, sim * 0.3);
                             active.insert(c);
                         }
                     }
