@@ -49,8 +49,11 @@ const SURPRISE_DECAY: f32 = 0.95;
 const INPUT_STRENGTH: f32 = 2.0;
 const SIM_THRESHOLD: f32 = 0.5;
 const EMBED_DRIFT: f32 = 0.001;
-const ACTIVE_EPSILON: f32 = 0.01;
+const ACTIVE_EPSILON: f32 = 0.05;
 const GLOBAL_SAMPLES: usize = 20;
+const ACTIVE_CAP: usize = 2048;
+const INGEST_PER_TICK: usize = 8;
+const LTP_SAMPLE_CAP: usize = 64;
 
 // ── Data structures ───────────────────────────────────────────────────
 // One node type. One edge type. That's it.
@@ -300,11 +303,19 @@ unsafe fn tick(ptr: *mut Node, count: usize, active: &mut HashSet<usize>,
     for i in wake { active.insert(i); }
 
     // ── Phase 3: STDP LTP — co-firing nodes form causal edges ────────
+    // Sample active set instead of full scan to stay O(fired × LTP_SAMPLE_CAP)
+    let active_vec: Vec<usize> = active.iter().copied().collect();
     for &si in &fired {
         if si >= count { continue; }
         let si_pos = (*ptr.add(si)).pos;
 
-        for &other in active.iter() {
+        let (offset, len) = if active_vec.len() > LTP_SAMPLE_CAP {
+            (rand_usize(active_vec.len() - LTP_SAMPLE_CAP), LTP_SAMPLE_CAP)
+        } else {
+            (0, active_vec.len())
+        };
+
+        for &other in &active_vec[offset..offset + len] {
             if other == si || other >= count { continue; }
             let on = &*ptr.add(other);
             if on.last_spike == 0 { continue; }
@@ -441,8 +452,9 @@ async fn main() -> io::Result<()> {
         loop {
             tick_n = tick_n.wrapping_add(1);
 
-            // ── Ingest ────────────────────────────────────────────────
-            while let Ok(input) = rx.try_recv() {
+            // ── Ingest (rate-limited) ─────────────────────────────────
+            for _ in 0..INGEST_PER_TICK {
+                let input = match rx.try_recv() { Ok(v) => v, Err(_) => break };
                 let pos = text_to_pos(&input.text);
                 let idx = arena.alloc(pos, &input.text);
                 let ptr = arena.ptr();
@@ -485,6 +497,17 @@ async fn main() -> io::Result<()> {
                 tick(arena.ptr(), arena.count, &mut active, tick_n, &mut surprise);
             }
 
+            // ── Evict if active set too large ─────────────────────────
+            if active.len() > ACTIVE_CAP {
+                let ptr = arena.ptr();
+                let mut by_membrane: Vec<(usize, f32)> = active.iter()
+                    .map(|&i| (i, unsafe { (*ptr.add(i)).membrane.abs() }))
+                    .collect();
+                by_membrane.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                by_membrane.truncate(ACTIVE_CAP);
+                active = by_membrane.into_iter().map(|(i, _)| i).collect();
+            }
+
             // ── Context update (~20 ticks) ────────────────────────────
             if tick_n.wrapping_sub(last_ctx) >= 20 {
                 let ctx = unsafe {
@@ -504,7 +527,12 @@ async fn main() -> io::Result<()> {
                 last_flush = tick_n;
             }
 
-            std::thread::sleep(Duration::from_millis(1));
+            // Adaptive sleep: fast when busy, slow when idle
+            if !rx.is_empty() || active.len() > 100 {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     });
 
