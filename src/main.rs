@@ -393,7 +393,7 @@ async fn main() -> io::Result<()> {
             let tx = tx.clone();
             move |Json(p): Json<InputPayload>| {
                 let tx = tx.clone();
-                async move { let _ = tx.try_send(p); Json("ok") }
+                async move { let _ = tx.try_send(p); Json(serde_json::json!({"status": "ok"})) }
             }
         }))
         .route("/context", get({
