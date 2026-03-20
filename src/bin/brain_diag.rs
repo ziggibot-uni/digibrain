@@ -326,10 +326,77 @@ impl History {
 
 // ── App ─────────────────────────────────────────────────────────────────
 
+fn snapshot_report(s: &Snapshot, h: &History) -> String {
+    let mut r = String::with_capacity(4096);
+    r.push_str("=== BRAIN SNAPSHOT ===\n\n");
+    r.push_str(&format!("Nodes: {}  |  Tick: {}  |  Node size: {} B\n", s.node_count, s.tick, size_of::<Node>()));
+    r.push_str(&format!("Recently fired: {}  |  Firing rate: {:.6}  |  Refractory: {}\n", s.recently_fired, s.firing_rate, s.refractory_count));
+    r.push_str(&format!("Total edges: {}  |  Mean edges/node: {:.2}  |  Full nodes ({}): {}\n\n", s.total_edges, s.mean_edge_count, MAX_EDGES, s.nodes_at_max_edges));
+
+    r.push_str("--- Membrane ---\n");
+    r.push_str(&format!("Mean: {:.6}  Std: {:.6}  Min: {:.6}  Max: {:.6}\n\n", s.mean_membrane, s.std_membrane, s.min_membrane, s.max_membrane));
+
+    r.push_str("--- Threshold ---\n");
+    r.push_str(&format!("Mean: {:.4} (rest=1.0)  Max: {:.4}\n\n", s.mean_threshold, s.max_threshold));
+
+    r.push_str("--- Connectivity ---\n");
+    r.push_str(&format!("Mean weight: {:.6}  Std: {:.6}  Range: [{:.4}, {:.4}]\n", s.mean_weight, s.std_weight, s.min_weight, s.max_weight));
+    r.push_str(&format!("Positive: {}  Negative: {}  ~Zero: {}\n", s.positive_edges, s.negative_edges, s.zero_edges));
+    let ratio = if s.positive_edges + s.negative_edges > 0 {
+        s.positive_edges as f32 / (s.positive_edges + s.negative_edges) as f32
+    } else { 0.5 };
+    r.push_str(&format!("Excitatory ratio: {:.1}%\n\n", ratio * 100.0));
+
+    r.push_str("--- Embedding Health ---\n");
+    r.push_str(&format!("Mean norm: {:.4}  Std: {:.4}  Min: {:.4}  Max: {:.4}\n\n", s.mean_embed_norm, s.std_embed_norm, s.min_embed_norm, s.max_embed_norm));
+
+    // Warnings
+    let mut warnings: Vec<&str> = Vec::new();
+    if s.mean_membrane.abs() > 0.5 { warnings.push("HIGH MEAN MEMBRANE — possible runaway"); }
+    if s.max_membrane > 5.0 { warnings.push("EXTREME MEMBRANE — seizure risk"); }
+    if s.mean_threshold > 2.0 { warnings.push("HIGH THRESHOLD — neurons hard to activate"); }
+    if ratio < 0.3 { warnings.push("LOW EXCITATORY RATIO — network may go silent"); }
+    if ratio > 0.95 { warnings.push("VERY HIGH EXCITATORY RATIO — seizure risk"); }
+    if s.std_embed_norm > 0.5 { warnings.push("HIGH NORM VARIANCE — embeddings drifting apart"); }
+    if s.mean_embed_norm < 0.1 { warnings.push("NEAR-ZERO NORMS — embedding collapse"); }
+    if s.firing_rate < 0.0001 && s.node_count > 100 { warnings.push("NEAR-ZERO FIRING RATE — brain may be silent"); }
+    if s.firing_rate > 0.5 { warnings.push("FIRING RATE > 50% — possible seizure"); }
+    if s.nodes_at_max_edges as f32 / s.node_count.max(1) as f32 > 0.1 { warnings.push("MANY FULL NODES — edge slots saturating"); }
+    if !warnings.is_empty() {
+        r.push_str("--- WARNINGS ---\n");
+        for w in &warnings { r.push_str(&format!("! {}\n", w)); }
+        r.push('\n');
+    }
+
+    r.push_str("--- Top Active Nodes ---\n");
+    for (text, membrane, spike, edges) in &s.top_active {
+        r.push_str(&format!("  [m={:.4} spike={} edges={}] {}\n", membrane, spike, edges, text));
+    }
+    r.push('\n');
+
+    // History trends (last 10 samples)
+    r.push_str("--- History (last 10 samples, 1s apart) ---\n");
+    let tail = |v: &[f64]| -> String {
+        let start = v.len().saturating_sub(10);
+        v[start..].iter().map(|x| format!("{:.4}", x)).collect::<Vec<_>>().join(", ")
+    };
+    r.push_str(&format!("  node_count:    [{}]\n", tail(&h.node_count)));
+    r.push_str(&format!("  firing_rate:   [{}]\n", tail(&h.firing_rate)));
+    r.push_str(&format!("  fired_count:   [{}]\n", tail(&h.recently_fired)));
+    r.push_str(&format!("  mean_membrane: [{}]\n", tail(&h.mean_membrane)));
+    r.push_str(&format!("  mean_weight:   [{}]\n", tail(&h.mean_weight)));
+    r.push_str(&format!("  mean_threshold:[{}]\n", tail(&h.mean_threshold)));
+    r.push_str(&format!("  total_edges:   [{}]\n", tail(&h.total_edges)));
+    r.push_str(&format!("  tick:          [{}]\n", tail(&h.tick)));
+
+    r
+}
+
 struct DiagApp {
     rx: mpsc::Receiver<Snapshot>,
     snap: Snapshot,
     history: History,
+    copied_flash: f32,
 }
 
 impl DiagApp {
@@ -338,6 +405,7 @@ impl DiagApp {
             rx,
             snap: Snapshot::default(),
             history: History::new(),
+            copied_flash: 0.0,
         }
     }
 }
@@ -363,10 +431,22 @@ impl eframe::App for DiagApp {
                     return;
                 }
 
-                ui.heading(format!(
-                    "CadenGraph v4 | {} nodes | tick {} | {:.1} KB/node",
-                    s.node_count, s.tick, size_of::<Node>() as f64 / 1024.0
-                ));
+                ui.horizontal(|ui| {
+                    ui.heading(format!(
+                        "CadenGraph v4 | {} nodes | tick {} | {:.1} KB/node",
+                        s.node_count, s.tick, size_of::<Node>() as f64 / 1024.0
+                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if self.copied_flash > 0.0 {
+                            ui.colored_label(egui::Color32::GREEN, "Copied!");
+                            self.copied_flash -= 0.25;
+                        } else if ui.button("Copy Snapshot").clicked() {
+                            let report = snapshot_report(s, &self.history);
+                            ui.ctx().copy_text(report);
+                            self.copied_flash = 2.0;
+                        }
+                    });
+                });
                 ui.separator();
 
                 // ── Overview ────────────────────────────────────────────
