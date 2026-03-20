@@ -406,6 +406,17 @@ async fn main() -> io::Result<()> {
                     node_count: g.node_count,
                 })
             }}
+        }))
+        .route("/think", get({
+            let s = shared.clone();
+            move || { let s = s.clone(); async move {
+                let g = s.lock().unwrap();
+                let thought: String = g.context.iter()
+                    .map(|e| e.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                thought
+            }}
         }));
 
     let addr: SocketAddr = "0.0.0.0:7070".parse().unwrap();
